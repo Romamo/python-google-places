@@ -108,18 +108,25 @@ def geocode_location(location, sensor=False):
         raise GooglePlacesError(error_detail)
     return geo_response['results'][0]['geometry']['location']
 
-def _get_place_details(reference, api_key, sensor=False,
-                       language=lang.ENGLISH):
+def _get_place_details(place_id, api_key, sensor=False,
+                       language=lang.ENGLISH, reference=None):
     """Gets a detailed place response.
 
     keyword arguments:
-    reference -- The unique Google reference for the required place.
+    place_id -- The unique identifier for a place
     """
+    params = {
+        'sensor': str(sensor).lower(),
+        'key': api_key,
+        'language': language,
+        'placeid': place_id,
+        }
+    if reference:
+        params['reference'] = reference
+        del params['placeid']
     url, detail_response = _fetch_remote_json(GooglePlaces.DETAIL_API_URL,
-                                              {'reference': reference,
-                                               'sensor': str(sensor).lower(),
-                                               'key': api_key,
-                                               'language': language})
+                                              params
+                                              )
     _validate_response(url, detail_response)
     return detail_response['result']
 
@@ -202,10 +209,14 @@ class GooglePlaces(object):
     RESPONSE_STATUS_OK = 'OK'
     RESPONSE_STATUS_ZERO_RESULTS = 'ZERO_RESULTS'
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, use_reference_deprecated=False):
         self._api_key = api_key
         self._sensor = False
         self._request_params = None
+        self.use_reference_deprecated = use_reference_deprecated
+        if self.use_reference_deprecated:
+            warnings.warn('Reference value is deprecated. Use place_id instead.',
+                          DeprecationWarning, stacklevel=2)
 
     def query(self, **kwargs):
         with warnings.catch_warnings():
@@ -419,32 +430,37 @@ class GooglePlaces(object):
         _validate_response(url, places_response)
         return GooglePlacesSearchResult(self, places_response)
 
-    def checkin(self, reference, sensor=False):
+    def checkin(self, place_id, sensor=False):
         """Checks in a user to a place.
 
         keyword arguments:
-        reference -- The unique Google reference for the relevant place.
+        place_id  -- The unique identifier for a place
         sensor    -- Boolean flag denoting if the location came from a
                      device using its location sensor (default False).
         """
-        data = {'reference': reference}
+        data = {'placeid': place_id}
+        if self.use_reference_deprecated:
+            data = {'reference': place_id}
         url, checkin_response = _fetch_remote_json(
                 GooglePlaces.CHECKIN_API_URL % (str(sensor).lower(),
                         self.api_key), json.dumps(data), use_http_post=True)
         _validate_response(url, checkin_response)
 
-    def get_place(self, reference, sensor=False, language=lang.ENGLISH):
+    def get_place(self, place_id, sensor=False, language=lang.ENGLISH):
         """Gets a detailed place object.
 
         keyword arguments:
-        reference -- The unique Google reference for the required place.
+
+        place_id  -- The unique identifier for a place
         sensor    -- Boolean flag denoting if the location came from a
                      device using its' location sensor (default False).
         language -- The language code, indicating in which language the
                     results should be returned, if possible. (default lang.ENGLISH)
         """
-        place_details = _get_place_details(reference,
-                self.api_key, sensor, language=language)
+        place_details = _get_place_details(place_id,
+                self.api_key, sensor, language=language,
+                reference=self.use_reference_deprecated and place_id or None
+                )
         return Place(self, place_details)
 
     def add_place(self, **kwargs):
@@ -514,19 +530,21 @@ class GooglePlaces(object):
                 self.api_key), json.dumps(request_params), use_http_post=True)
         _validate_response(url, add_response)
         return {'reference': add_response['reference'],
+                'place_id': add_response['place_id'],
                 'id': add_response['id']}
 
-    def delete_place(self, reference, sensor=False):
+    def delete_place(self, place_id, sensor=False):
         """Deletes a place from the Google Places database.
 
         keyword arguments:
-        reference  -- The textual identifier that uniquely identifies this
-                      Place, returned from a Place Search request.
-        sensor     -- Boolean flag denoting if the location came from a device
-                      using its location sensor (default False).
+        place_id  -- The unique identifier for a place
+        sensor    -- Boolean flag denoting if the location came from a device
+                     using its location sensor (default False).
         """
 
-        request_params = {'reference': reference}
+        request_params = {'placeid': place_id}
+        if self.use_reference_deprecated:
+            request_params = {'reference': place_id}
         url, delete_response = _fetch_remote_json(
                 GooglePlaces.DELETE_API_URL % (str(sensor).lower(),
                 self.api_key), json.dumps(request_params), use_http_post=True)
@@ -685,7 +703,7 @@ class Prediction(object):
 
     def get_details(self, language=None):
         """
-        Retrieves full information on the place matching the reference.
+        Retrieves full information on the place matching the place_id.
 
         Stores the response in the `place` property.
         """
@@ -696,8 +714,9 @@ class Prediction(object):
                 except KeyError:
                     language = lang.ENGLISH
             place = _get_place_details(
-                    self.reference, self._query_instance.api_key,
-                    self._query_instance.sensor, language=language)
+                    self.place_id, self._query_instance.api_key,
+                    self._query_instance.sensor, language=language,
+                    )
             self._place = Place(self._query_instance, place)
 
     def _validate_status(self):
@@ -755,6 +774,7 @@ class Place(object):
     """
     def __init__(self, query_instance, place_data):
         self._query_instance = query_instance
+        self._place_id = place_data['place_id']
         self._id = place_data['id']
         self._reference = place_data['reference']
         self._name = place_data.get('name','')
@@ -790,6 +810,13 @@ class Place(object):
         Place across separate searches.
         """
         return self._id
+
+    @property
+    def place_id(self):
+        """Returns the unique stable identifier denoting this place.
+
+        """
+        return self._place_id
 
     @property
     def icon(self):
@@ -907,11 +934,11 @@ class Place(object):
 
     def checkin(self):
         """Checks in an anonymous user in."""
-        self._query_instance.checkin(self.reference,
+        self._query_instance.checkin(self.place_id,
                                      self._query_instance.sensor)
 
     def get_details(self, language=None):
-        """Retrieves full information on the place matching the reference.
+        """Retrieves full information on the place matching the place_id.
 
         Further attributes will be made available on the instance once this
         method has been invoked.
@@ -929,7 +956,7 @@ class Place(object):
                 except KeyError:
                     language = lang.ENGLISH
             self._details = _get_place_details(
-                    self.reference, self._query_instance.api_key,
+                    self.place_id, self._query_instance.api_key,
                     self._query_instance.sensor, language=language)
 
     @cached_property
